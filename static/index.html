@@ -1,0 +1,259 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Go — Lobby</title>
+<style>
+  body { font-family: sans-serif; margin:0; padding:0; display:flex; height:100vh; }
+  #left { width: 100%; max-width: 720px; padding:16px; box-sizing:border-box; overflow:auto; }
+  #right { width: 320px; border-left:1px solid #ddd; padding:12px; box-sizing:border-box; }
+  .card { border:1px solid #ccc; padding:8px; margin-bottom:8px; border-radius:8px; }
+  input, button, select { padding:8px; margin:4px 0; width:100%; box-sizing:border-box; }
+  .row { display:flex; gap:8px; }
+  .small { width:48%; }
+  .lobby-actions { display:flex; gap:8px; margin-top:8px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div id="left">
+  <div id="auth" class="card">
+    <h3 id="auth-title">Вход / Регистрация</h3>
+    <input id="username" placeholder="Логин" />
+    <input id="password" placeholder="Пароль" type="password" />
+    <div class="row">
+      <button id="btn-login">Войти</button>
+      <button id="btn-register">Регистрация</button>
+    </div>
+    <div style="margin-top:8px;" id="auth-msg"></div>
+  </div>
+
+  <div id="lobbies-area" class="hidden">
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:8px;">
+      <h3>Лобби</h3>
+      <div>
+        <button id="btn-logout">Выход</button>
+      </div>
+    </div>
+    <div class="card">
+      <h4>Создать лобби</h4>
+        <input type="text" id="lobbyName" placeholder="Название лобби">
+      <div class="row">
+        <input type="number" id="lobbyTimer" placeholder="Таймер (сек.)" value="600">
+      </div>
+        <button onclick="createLobby()">Создать лобби</button>
+    </div>
+    <div id="lobbies-list"></div>
+  </div>
+
+  <div id="game-area" class="hidden">
+    <button id="btn-back-to-lobbies">Вернуться в лобби</button>
+    <div id="game-container"></div>
+  </div>
+</div>
+
+<div id="right">
+  <h4>Игроки онлайн</h4>
+  <div id="online-list"></div>
+</div>
+
+<script>
+let token = '';
+let me = null;
+
+function show(msg){ document.getElementById('auth-msg').textContent = msg; }
+
+async function api(path, method='GET', body=null){
+  const headers = {};
+  if (body && !(body instanceof FormData)) headers['Content-Type'] = 'application/json';
+  const url = '/api' + path + (token && path.includes('?')? '&token='+token : token && !path.includes('?')? '?token='+token : '');
+  const res = await fetch(url, {method, headers, body: body && !(body instanceof FormData) ? JSON.stringify(body) : body});
+  if (res.status === 401) { logoutLocal(); throw new Error('unauth'); }
+  return res.json();
+}
+
+// Регистрация
+document.getElementById('btn-register').addEventListener('click', async ()=>{
+  const u = document.getElementById('username').value.trim();
+  const p = document.getElementById('password').value;
+  if(!u || !p){ show('Введите логин и пароль'); return; }
+  try{
+    const res = await fetch('/api/register', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({username: u, password: p})
+    });
+    if(!res.ok){
+      const err = await res.json().catch(()=>({detail:'error'}));
+      show('Ошибка регистрации: ' + (err.detail || err));
+      return;
+    }
+    const j = await res.json();
+    show('Зарегистрирован: ' + j.username);
+  }catch(e){
+    show('Ошибка регистрации (network)');
+    console.error(e);
+  }
+});
+
+// Логин (JSON)
+document.getElementById('btn-login').addEventListener('click', async ()=>{
+  const u = document.getElementById('username').value.trim();
+  const p = document.getElementById('password').value;
+  if(!u || !p){ show('Введите логин и пароль'); return; }
+  try{
+    const res = await fetch('/api/login_json', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({username: u, password: p})
+    });
+    if(!res.ok){
+      const err = await res.json().catch(()=>({detail:'invalid'}));
+      show('Ошибка входа: ' + (err.detail || err));
+      return;
+    }
+    const j = await res.json();
+    token = j.access_token;
+    me = j.user;
+    // сохраняем в localStorage для удобства (опционально)
+    localStorage.setItem('go_token', token);
+    localStorage.setItem('go_user', JSON.stringify(me));
+    show('Вошли как ' + me.username);
+    document.getElementById('auth').classList.add('hidden');
+    document.getElementById('lobbies-area').classList.remove('hidden');
+    loadLobbies(); loadOnline();
+  }catch(e){
+    show('Ошибка входа (network)');
+    console.error(e);
+  }
+});
+
+document.getElementById('btn-logout').addEventListener('click', async ()=>{
+  try{ await api('/logout','POST'); }catch(e){}
+  logoutLocal();
+});
+
+function logoutLocal(){ token=''; me=null; document.getElementById('auth').classList.remove('hidden'); document.getElementById('lobbies-area').classList.add('hidden'); }
+
+async function loadLobbies(){
+  const l = await api('/lobbies');
+  const container = document.getElementById('lobbies-list'); container.innerHTML='';
+  l.forEach(lob =>{
+    const el = document.createElement('div'); el.className='card';
+    el.innerHTML = `<strong>${lob.name}</strong> <div>size: ${lob.board_size} time: ${lob.time_control||'—'}</div>
+      <div>Black: ${lob.black||'—'} | White: ${lob.white||'—'}</div>`;
+    const btnJoin = document.createElement('button'); btnJoin.textContent='Присоединиться';
+    btnJoin.onclick = async ()=>{ await api('/join_lobby','POST',{lobby_id:lob.id}); loadLobbies(); };
+    el.appendChild(btnJoin);
+    if(me && me.id === lob.owner_user_id){
+      const btnStart = document.createElement('button'); btnStart.textContent='Запустить игру';
+      btnStart.onclick = async ()=>{ const r = await api('/start_game','POST',{lobby_id:lob.id}); if(r.game_id){ startGame(r.game_id); } };
+      const btnDisband = document.createElement('button'); btnDisband.textContent='Расформировать';
+      btnDisband.onclick = async ()=>{ await api('/leave_lobby','POST',{lobby_id:lob.id}); loadLobbies(); }
+      el.appendChild(btnStart); el.appendChild(btnDisband);
+    }
+    container.appendChild(el);
+  });
+}
+
+async function loadOnline(){
+  const list = await api('/online');
+  const container = document.getElementById('online-list'); container.innerHTML='';
+  list.forEach(u=>{
+    const el = document.createElement('div'); el.textContent = u.username + (u.online? ' (online)':'');
+    if(me && me.role === 'admin' && u.id !== me.id){
+      const ban = document.createElement('button'); ban.textContent = u.role === 'banned' ? 'Разбанить' : 'Забанить';
+      ban.onclick = async ()=>{ if(u.role === 'banned') await api('/unban_user','POST',{user_id:u.id}); else await api('/ban_user','POST',{user_id:u.id}); loadOnline(); };
+      el.appendChild(ban);
+    }
+    container.appendChild(el);
+  });
+}
+
+document.getElementById('btn-create').addEventListener('click', async ()=>{
+  const name = document.getElementById('lobby-name').value || 'Лобби';
+  const size = parseInt(document.getElementById('board-size').value) || 19;
+  const tc = parseInt(document.getElementById('time-control').value) || null;
+  await api('/lobbies','POST',{name:name, board_size:size, time_control: tc});
+  loadLobbies();
+});
+
+document.getElementById('btn-back-to-lobbies').addEventListener('click', ()=>{
+  document.getElementById('game-area').classList.add('hidden');
+  document.getElementById('lobbies-area').classList.remove('hidden');
+});
+
+async function createLobby() {
+    const name = document.getElementById('lobbyName').value;
+    const timer = parseInt(document.getElementById('lobbyTimer').value) || 600;
+    const token = localStorage.getItem('token'); // или где храните токен
+
+    const res = await fetch(`http://192.168.0.28:8000/api/lobbies?token=${token}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name, timer: timer})
+    });
+
+    if(res.ok){
+        const data = await res.json();
+        console.log('Лобби создано:', data);
+        loadLobbyList(); // обновляем список лобби
+    } else {
+        const err = await res.json();
+        alert('Ошибка создания лобби: ' + (err.detail || res.status));
+    }
+}
+
+let ws = null;
+function startGame(game_id){
+  document.getElementById('lobbies-area').classList.add('hidden');
+  document.getElementById('game-area').classList.remove('hidden');
+  document.getElementById('game-container').innerHTML = '';
+  // create canvas game area (reuse earlier board code but inline)
+  const canvas = document.createElement('canvas'); canvas.id = 'board'; canvas.style.width='90vmin'; canvas.style.height='90vmin';
+  document.getElementById('game-container').appendChild(canvas);
+  const status = document.createElement('div'); status.id='game-status'; document.getElementById('game-container').appendChild(status);
+
+  const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/game/${game_id}?token=${token}`;
+  ws = new WebSocket(url);
+  let board_state = null;
+  ws.onmessage = (ev)=>{
+    const d = JSON.parse(ev.data);
+    if(d.type==='state'){
+      board_state = d.board; renderBoard(board_state);
+    } else if(d.type==='error'){ alert('Ошибка: '+d.reason); }
+    else if(d.type==='result'){ alert('Результат: '+d.msg); }
+  };
+  function renderBoard(bs){
+    const c = canvas; const ctx = c.getContext('2d'); const size = bs.size; const grid = bs.grid;
+    // resize
+    c.width = c.clientWidth; c.height = c.clientHeight;
+    ctx.clearRect(0,0,c.width,c.height);
+    const s = Math.min(c.width,c.height); const margin = s*0.04; const cell = (s-2*margin)/(size-1);
+    ctx.strokeStyle='#000'; for(let i=0;i<size;i++){ ctx.beginPath(); ctx.moveTo(margin, margin+i*cell); ctx.lineTo(margin+(size-1)*cell, margin+i*cell); ctx.stroke(); ctx.beginPath(); ctx.moveTo(margin+i*cell, margin); ctx.lineTo(margin+i*cell, margin+(size-1)*cell); ctx.stroke(); }
+    for(let y=0;y<size;y++){ for(let x=0;x<size;x++){ const cval = grid[y][x]; if(cval===0) continue; ctx.beginPath(); ctx.arc(margin+x*cell, margin+y*cell, cell*0.42,0,Math.PI*2); ctx.fillStyle = cval===1? '#000':'#fff'; ctx.fill(); ctx.stroke(); }}
+    document.getElementById('game-status').textContent = (bs.to_move===1? 'Black to move':'White to move');
+  }
+  canvas.addEventListener('click', (e)=>{
+    const rect = canvas.getBoundingClientRect(); const x = e.clientX-rect.left; const y = e.clientY-rect.top; const s = Math.min(canvas.width, canvas.height); const margin = s*0.04; const cell = (s-2*margin)/(board_state.size-1); const gx = Math.round((x-margin)/cell); const gy = Math.round((y-margin)/cell);
+    ws.send(JSON.stringify({type:'play', x:gx, y:gy}));
+  });
+}
+
+window.addEventListener('load', ()=>{
+  const storedToken = localStorage.getItem('go_token');
+  const storedUser = localStorage.getItem('go_user');
+  if(storedToken && storedUser){
+    token = storedToken;
+    me = JSON.parse(storedUser);
+    document.getElementById('auth').classList.add('hidden');
+    document.getElementById('lobbies-area').classList.remove('hidden');
+    loadLobbies(); loadOnline();
+  }
+  setInterval(()=>{ if(me){ loadLobbies(); loadOnline(); } }, 5000);
+});
+
+</script>
+</body>
+</html>
